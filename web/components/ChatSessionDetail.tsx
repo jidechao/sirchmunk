@@ -31,6 +31,7 @@ interface ChatMessage {
   sources?: {
     rag?: Array<{ kb_name: string; content: string }>;
     web?: Array<{ url: string; title?: string }>;
+    references?: Array<{ file: string; summary: string; snippets: string[] }>;
   };
 }
 
@@ -274,10 +275,15 @@ export default function ChatSessionDetail({
                             {msg.sources.references.map((ref: any, i: number) => (
                               <div key={`ref-${i}`} className="px-3 py-2 space-y-1">
                                 <div className="flex items-center gap-1.5">
-                                  <FileText className="w-3 h-3 text-blue-500 shrink-0" />
-                                  <span className="text-xs font-medium text-slate-700 dark:text-slate-300 truncate" title={ref.file}>
-                                    {ref.file.split('/').pop()}
-                                  </span>
+                                  <FileText className="w-3 h-3 text-blue-500 shrink-0 mt-0.5" />
+                                  <div className="min-w-0">
+                                    <span className="text-xs font-medium text-slate-700 dark:text-slate-300 block truncate">
+                                      {ref.file.split('/').pop()}
+                                    </span>
+                                    <span className="text-[10px] text-slate-400 dark:text-slate-500 block truncate select-all" title={ref.file}>
+                                      {ref.file}
+                                    </span>
+                                  </div>
                                 </div>
                                 {ref.summary && (
                                   <p className="text-xs text-slate-600 dark:text-slate-400">{ref.summary}</p>

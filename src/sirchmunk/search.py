@@ -432,10 +432,7 @@ class AgenticSearch(BaseSearch):
             file_or_url=file_path,
             summary=evidence[:500] if evidence else "",
             is_found=True,
-            snippets=(
-                [{"snippet": evidence[:2000], "score": 1.0}]
-                if evidence else []
-            ),
+            snippets=[evidence[:2000]] if evidence else [],
             extracted_at=datetime.now(timezone.utc),
         )
 

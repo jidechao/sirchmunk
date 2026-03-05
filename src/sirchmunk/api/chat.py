@@ -634,10 +634,17 @@ async def _run_rag_search(
             for ev in cluster.evidences:
                 if not ev.is_found:
                     continue
+                raw_snippets = ev.snippets[:3] if ev.snippets else []
+                snippets = []
+                for s in raw_snippets:
+                    if isinstance(s, dict):
+                        snippets.append(s.get("snippet", str(s)))
+                    else:
+                        snippets.append(str(s))
                 references.append({
                     "file": str(ev.file_or_url),
-                    "summary": ev.summary,
-                    "snippets": ev.snippets[:3],
+                    "summary": ev.summary or "",
+                    "snippets": snippets,
                 })
     else:
         answer = result if isinstance(result, str) else str(result)
@@ -845,7 +852,7 @@ async def _chat_rag_web_search(
 
             logger.info("[MODE 4] RAG search with query: %s, paths: %s", message, paths)
 
-            rag_result, llm_usages = await _run_rag_search(
+            rag_result, llm_usages, references = await _run_rag_search(
                 message, paths, search_mode, search_log_callback,
             )
 
@@ -866,6 +873,8 @@ async def _chat_rag_web_search(
                 "content": f"Retrieved from {kb_name}",
                 "relevance_score": 0.92,
             }]
+            if references:
+                sources["references"] = references
             break  # success
 
         except Exception as e:
@@ -1269,10 +1278,9 @@ async def load_chat_session(session_id: str):
     }
 
 # Legacy search endpoints for backward compatibility
-@router.get("/search/{kb_name}/suggestions")
-async def get_search_suggestions(kb_name: str, query: str, limit: int = 8):
-    """Get search suggestions - kept for backward compatibility"""
-    # For now, return empty suggestions since we're using real file search
+@router.get("/search/suggestions")
+async def get_search_suggestions(query: str, kb_name: str = "", limit: int = 8):
+    """Get search suggestions based on query text."""
     if not query or len(query.strip()) < 2:
         return {
             "success": True,
