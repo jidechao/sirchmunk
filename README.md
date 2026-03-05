@@ -661,7 +661,7 @@ curl -X POST http://localhost:8584/api/v1/search \
     "keyword_levels": 3,
     "include_patterns": ["*.py", "*.java"],
     "exclude_patterns": ["*test*", "*__pycache__*"],
-    "return_cluster": true
+    "return_context": true
   }'
 
 # Check server status
@@ -749,7 +749,7 @@ if (data.success) {
 | `keyword_levels` | `int` | `null` | Keyword granularity levels |
 | `include_patterns` | `string[]` | `null` | File glob patterns to include |
 | `exclude_patterns` | `string[]` | `null` | File glob patterns to exclude |
-| `return_cluster` | `bool` | `false` | Return full KnowledgeCluster object |
+| `return_context` | `bool` | `false` | Return SearchContext with cluster and telemetry |
 
 > **Note:** `FILENAME_ONLY` mode does not require an LLM API key. `FAST` and `DEEP` modes require a configured LLM.
 

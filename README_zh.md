@@ -661,7 +661,7 @@ curl -X POST http://localhost:8584/api/v1/search \
     "keyword_levels": 3,
     "include_patterns": ["*.py", "*.java"],
     "exclude_patterns": ["*test*", "*__pycache__*"],
-    "return_cluster": true
+    "return_context": true
   }'
 
 # 检查服务器状态
@@ -749,7 +749,7 @@ if (data.success) {
 | `keyword_levels` | `int` | `null` | 关键词粒度层级 |
 | `include_patterns` | `string[]` | `null` | 文件 glob 匹配模式（包含） |
 | `exclude_patterns` | `string[]` | `null` | 文件 glob 匹配模式（排除） |
-| `return_cluster` | `bool` | `false` | 是否返回完整的 KnowledgeCluster 对象 |
+| `return_context` | `bool` | `false` | 返回完整的 SearchContext 对象（含 KnowledgeCluster 和遥测数据） |
 
 > **注意：** `FILENAME_ONLY` 模式无需 LLM API Key。`FAST` 和 `DEEP` 模式需要配置 LLM。
 
