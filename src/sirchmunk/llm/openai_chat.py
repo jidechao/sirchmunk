@@ -120,11 +120,11 @@ class OpenAIChat:
 
         if "openai.com" in url:
             return "openai"
-        if "anthropic.com" in url:
+        elif "anthropic.com" in url:
             return "anthropic"
-        if "generativelanguage.googleapis.com" in url or "googleapis.com" in url:
+        elif "googleapis.com" in url:
             return "gemini"
-        if "deepseek.com" in url:
+        elif "deepseek.com" in url:
             return "deepseek"
         # Add more provider detections as needed
         
