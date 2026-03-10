@@ -141,9 +141,9 @@ It serves as a unified intelligent hub for AI agents, delivering deep insights a
 ---
 
 
-|  WeChat Group
-|:-------------------------:
-|  <img src="assets/pic/wechat.jpg" width="200" height="200">
+|  WeChat Group  |  DingTalk Group  |
+|:--------------:|:----------------:|
+|  <img src="assets/pic/wechat.jpg" width="200" height="200">  |  <img src="assets/pic/dingtalk.png" width="200" height="200">  |
 
 ---
 

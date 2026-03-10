@@ -139,9 +139,9 @@
 ---
 
 
-|  WeChat Group
-|:-------------------------:
-|  <img src="assets/pic/wechat.jpg" width="200" height="200">
+|  微信群  |  钉钉群  |
+|:--------:|:--------:|
+|  <img src="assets/pic/wechat.jpg" width="200" height="200">  |  <img src="assets/pic/dingtalk.png" width="200" height="200">  |
 
 ---
 
