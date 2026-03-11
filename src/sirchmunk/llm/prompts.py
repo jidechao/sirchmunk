@@ -319,6 +319,20 @@ Provide a well-structured Markdown summary.
 """
 
 
+HISTORY_RELEVANCE_CHECK = """Determine whether the conversation history is topically relevant to the latest user message.
+
+### Conversation History (last few turns)
+{history}
+
+### Latest User Message
+{message}
+
+### Rules
+- Output JSON only: {{"relevant": true}} or {{"relevant": false}}
+- "relevant" = true if the history and the latest message share the same topic, continue the same discussion, or the latest message references context from the history (e.g. pronouns, follow-up questions).
+- "relevant" = false if the latest message introduces a completely new, unrelated topic with no dependency on prior context."""
+
+
 QUERY_REWRITE = """Given the conversation history and the latest user message, rewrite the user message into a standalone search query that captures the full intent without relying on prior context. If the message is already self-contained, return it unchanged.
 
 ### Conversation History

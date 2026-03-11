@@ -5,6 +5,7 @@ Provides WebSocket endpoint for real-time chat conversations with integrated sea
 """
 import logging
 import platform
+import re
 import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
@@ -171,6 +172,46 @@ async def _rewrite_query_with_context(
     if rewritten != message:
         logger.info("[multi-turn] Query rewritten: '%s' → '%s'", message[:60], rewritten[:60])
     return rewritten
+
+
+async def _filter_relevant_history(
+    message: str,
+    history: List[Dict[str, str]],
+    llm: OpenAIChat,
+) -> List[Dict[str, str]]:
+    """Return *history* if topically relevant to *message*, else empty list.
+
+    A single lightweight LLM call decides whether the conversation history
+    shares the same topic as the current query.  When the user switches to
+    an entirely new topic, injecting stale history would confuse the model,
+    so we discard it.
+    """
+    if not history:
+        return []
+
+    from sirchmunk.llm.prompts import HISTORY_RELEVANCE_CHECK
+
+    history_text = "\n".join(
+        f"{m['role'].capitalize()}: {m['content'][:200]}" for m in history[-4:]
+    )
+    prompt = HISTORY_RELEVANCE_CHECK.format(history=history_text, message=message)
+    try:
+        resp = await llm.achat(
+            messages=[{"role": "user", "content": prompt}],
+            stream=False,
+        )
+        text = (resp.content or "").strip()
+        match = re.search(r'"relevant"\s*:\s*(true|false)', text, re.IGNORECASE)
+        if match and match.group(1).lower() == "false":
+            logger.info(
+                "[multi-turn] History topic diverged from query — discarding %d turn(s)",
+                len(history),
+            )
+            return []
+    except Exception as exc:
+        logger.debug("[multi-turn] History relevance check failed, keeping history: %s", exc)
+
+    return history
 
 
 # Tkinter availability is checked lazily to avoid initialising
@@ -1129,6 +1170,15 @@ async def chat_websocket(websocket: WebSocket):
             # Build conversation history for multi-turn support
             # ============================================================
             chat_history = _build_chat_history(session_id)
+
+            if chat_history:
+                envs_for_filter: Dict[str, Any] = get_envs()
+                filter_llm = OpenAIChat(
+                    api_key=envs_for_filter["api_key"],
+                    base_url=envs_for_filter["base_url"],
+                    model=envs_for_filter["model_name"],
+                )
+                chat_history = await _filter_relevant_history(message, chat_history, filter_llm)
 
             # ============================================================
             # Route to appropriate chat mode based on feature flags
