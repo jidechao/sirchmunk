@@ -451,12 +451,12 @@ python scripts/stop_web.py
 
 | 区域 | 镜像 |
 |---|---|
-| 美西 | `modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/sirchmunk:ubuntu22.04-py312-0.0.4` |
-| 北京 | `modelscope-registry.cn-beijing.cr.aliyuncs.com/modelscope-repo/sirchmunk:ubuntu22.04-py312-0.0.4` |
+| 美西 | `modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/sirchmunk:ubuntu22.04-py312-0.0.6` |
+| 北京 | `modelscope-registry.cn-beijing.cr.aliyuncs.com/modelscope-repo/sirchmunk:ubuntu22.04-py312-0.0.6` |
 
 ```bash
 # 拉取镜像（根据地理位置选择最近的 Registry）
-docker pull modelscope-registry.cn-beijing.cr.aliyuncs.com/modelscope-repo/sirchmunk:ubuntu22.04-py312-0.0.4
+docker pull modelscope-registry.cn-beijing.cr.aliyuncs.com/modelscope-repo/sirchmunk:ubuntu22.04-py312-0.0.6
 
 # 启动服务
 docker run -d \
@@ -472,8 +472,19 @@ docker run -d \
   -e SIRCHMUNK_SEARCH_PATHS=/mnt/docs \
   -v /path/to/your_work_path:/data/sirchmunk \
   -v /path/to/your/docs:/mnt/docs:ro \
-  modelscope-registry.cn-beijing.cr.aliyuncs.com/modelscope-repo/sirchmunk:ubuntu22.04-py312-0.0.4
+  modelscope-registry.cn-beijing.cr.aliyuncs.com/modelscope-repo/sirchmunk:ubuntu22.04-py312-0.0.6
 ```
+
+
+<details>
+<summary><b>历史版本</b></summary>
+
+| 版本 | 区域 | 镜像 |
+|---|---|---|
+| v0.0.4 | 美西 | `modelscope-registry.us-west-1.cr.aliyuncs.com/modelscope-repo/sirchmunk:ubuntu22.04-py312-0.0.4` |
+| v0.0.4 | 北京 | `modelscope-registry.cn-beijing.cr.aliyuncs.com/modelscope-repo/sirchmunk:ubuntu22.04-py312-0.0.4` |
+
+</details>
 
 打开 http://localhost:8584 访问 WebUI，或直接调用 API：
 
