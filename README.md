@@ -3,6 +3,7 @@
 <img src="web/public/logo-v2.png" alt="Sirchmunk Logo" width="250" style="border-radius: 15px;">
 
 # Sirchmunk: Raw data to self-evolving intelligence, real-time. 
+<a href="https://trendshift.io/repositories/22808" target="_blank"><img src="https://trendshift.io/api/badge/repositories/22808" alt="modelscope%2Fsirchmunk | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
