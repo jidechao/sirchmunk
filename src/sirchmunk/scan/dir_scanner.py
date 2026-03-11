@@ -287,10 +287,12 @@ class DirectoryScanner:
         result.total_files = len(all_files)
         logger.info(f"[DirScanner] Found {result.total_files} files in {result.total_dirs} dirs")
 
-        # Truncate if too many
         if len(all_files) > self.max_files:
-            logger.warning(f"[DirScanner] Truncating to {self.max_files} files (from {len(all_files)})")
-            all_files = all_files[: self.max_files]
+            all_files = self._stratified_sample(all_files, self.max_files)
+            logger.info(
+                f"[DirScanner] Stratified sampling: {len(all_files)} files "
+                f"(from {result.total_files})"
+            )
 
         # Extract metadata in parallel
         loop = asyncio.get_event_loop()
@@ -422,6 +424,34 @@ class DirectoryScanner:
                 ext = entry.suffix.lower()
                 if ext in _SCANNABLE_EXTENSIONS:
                     out.append(entry)
+
+    @staticmethod
+    def _stratified_sample(files: List[Path], budget: int) -> List[Path]:
+        """Proportionally sample *budget* files across parent directories.
+
+        Groups files by their immediate parent directory, then allocates
+        a proportional share of the budget to each group (min 1 per group).
+        Within each group, files are sorted by modification time (newest
+        first) so recently-updated files are preferred.
+        """
+        from collections import defaultdict
+        groups: Dict[Path, List[Path]] = defaultdict(list)
+        for f in files:
+            groups[f.parent].append(f)
+
+        total = len(files)
+        sampled: List[Path] = []
+
+        for parent, group in groups.items():
+            share = max(1, int(budget * len(group) / total))
+            group.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            sampled.extend(group[:share])
+
+        if len(sampled) > budget:
+            sampled.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            sampled = sampled[:budget]
+
+        return sampled
 
     # ---- Metadata extraction ----
 

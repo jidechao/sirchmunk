@@ -957,7 +957,7 @@ class AgenticSearch(BaseSearch):
             max_depth: Maximum directory depth for file search (default: 5).
                 Used in both FILENAME_ONLY and DEEP modes.
             top_k_files: Max files for evidence extraction (default: 3).
-            enable_dir_scan: Enable directory scanning tool (DEEP mode).
+            enable_dir_scan: Enable directory scanning (FAST and DEEP modes).
             include: File glob patterns to include (e.g. ``["*.py", "*.md"]``).
                 Used in both FILENAME_ONLY and DEEP modes.
             exclude: File glob patterns to exclude (e.g. ``["*.log"]``).
@@ -1010,7 +1010,8 @@ class AgenticSearch(BaseSearch):
         if mode == "FAST":
             answer, cluster, context = await self._search_fast(
                 query=query, paths=paths, max_depth=max_depth,
-                top_k_files=top_k_files, include=include, exclude=exclude,
+                top_k_files=top_k_files, enable_dir_scan=enable_dir_scan,
+                include=include, exclude=exclude,
             )
         else:
             answer, cluster, context = await self._search_deep(
@@ -1272,10 +1273,16 @@ class AgenticSearch(BaseSearch):
             f"loading {len(doc_files)} file(s) for direct analysis: {filenames}"
         )
 
-        # Step 3: for summary operations, use the chunked summarizer;
-        # for other operations (translate, explain, etc.), use the general analyser.
+        # Step 3: for summary operations, use the chunked summarizer
+        # with optional smart dir scanning; for other operations, use the
+        # general analyser.
         if operation in ("summarize", "summary", "extract"):
-            answer = await self._summarize_documents(query, paths)
+            scan_result = None
+            if self._has_directory_paths(paths):
+                scan_result = await self._probe_dir_scan(paths, max_files=300)
+            answer = await self._summarize_documents(
+                query, paths, scan_result=scan_result,
+            )
         else:
             answer = await analyse_documents(
                 query=query,
@@ -1336,8 +1343,13 @@ class AgenticSearch(BaseSearch):
         paths: List[str],
         *,
         top_k_files: int = 5,
+        scan_result=None,
     ) -> Optional[str]:
         """Summarize documents from *paths* with smart content sampling.
+
+        When *scan_result* (from a prior directory scan) is provided, the
+        LLM ranks candidates first so only the most relevant files are
+        summarized.  Otherwise falls back to ``collect_doc_files``.
 
         Small files are loaded in full; large files are sampled (head + mid +
         tail).  When the total content exceeds the LLM context budget, the
@@ -1349,8 +1361,23 @@ class AgenticSearch(BaseSearch):
         """
         from sirchmunk.doc_qa import collect_doc_files, _extract_text, _sample_text
 
+        summary_paths: Optional[List[str]] = None
+
+        # When a scan result is available, use LLM ranking to pick candidates
+        if scan_result is not None:
+            ranked = await self._rank_dir_scan_candidates(
+                query, scan_result,
+                top_k=top_k_files * 2,
+                include_medium=True,
+            )
+            if ranked:
+                summary_paths = ranked[:top_k_files]
+                await self._logger.info(
+                    f"[Summary] Dir scan selected {len(summary_paths)} relevant file(s)"
+                )
+
         doc_files = collect_doc_files(
-            paths,
+            summary_paths or paths,
             max_files=top_k_files,
             max_file_size=self._SUMMARY_MAX_FILE_SIZE,
         )
@@ -1470,14 +1497,17 @@ class AgenticSearch(BaseSearch):
         *,
         max_depth: Optional[int] = 5,
         top_k_files: int = 3,
+        enable_dir_scan: bool = True,
         include: Optional[List[str]] = None,
         exclude: Optional[List[str]] = None,
     ) -> Tuple[str, Optional[KnowledgeCluster], SearchContext]:
-        """Greedy search: 2 LLM calls, single best file, focused evidence.
+        """Greedy search: 2-3 LLM calls, single best file, focused evidence.
 
         Two-level keyword cascade extracted in one LLM call:
         primary (compound phrase) is tried first; if it misses, fallback
-        (atomic terms) is tried.  Greedy early-termination at every step.
+        (atomic terms) is tried.  When ``enable_dir_scan`` is True and
+        paths contain directories, a directory scan runs concurrently with
+        keyword extraction and acts as a fallback retrieval path.
 
         Returns:
             ``(answer, cluster, context)`` — same triple as ``_search_deep``
@@ -1499,13 +1529,33 @@ class AgenticSearch(BaseSearch):
             return str(content), reused, context
 
         # ==============================================================
-        # Step 1: LLM → 2-level keywords in one call (stream=False)
+        # Step 1: [Parallel] LLM keyword extraction + Dir scan
+        # Dir scan runs concurrently (filesystem-only phase) so it adds
+        # negligible wall-clock time to the keyword extraction LLM call.
         # ==============================================================
-        prompt = FAST_QUERY_ANALYSIS.format(user_input=query)
-        resp = await self.llm.achat(
-            messages=[{"role": "user", "content": prompt}],
-            stream=False,
+        async def _step1_keywords():
+            prompt = FAST_QUERY_ANALYSIS.format(user_input=query)
+            return await self.llm.achat(
+                messages=[{"role": "user", "content": prompt}],
+                stream=False,
+            )
+
+        step1_results = await asyncio.gather(
+            _step1_keywords(),
+            self._probe_dir_scan(paths, enable=enable_dir_scan, max_files=300),
+            return_exceptions=True,
         )
+
+        resp = step1_results[0] if not isinstance(step1_results[0], Exception) else None
+        scan_result = step1_results[1] if not isinstance(step1_results[1], Exception) else None
+
+        if isinstance(step1_results[0], Exception):
+            await self._logger.warning(f"[FAST:Step1] Keyword extraction failed: {step1_results[0]}")
+            msg = f"Failed to analyze query: '{query}'"
+            return msg, None, context
+        if isinstance(step1_results[1], Exception):
+            await self._logger.warning(f"[FAST:Step1] Dir scan failed: {step1_results[1]}")
+
         self.llm_usages.append(resp.usage)
         if resp.usage and isinstance(resp.usage, dict):
             context.add_llm_tokens(
@@ -1525,7 +1575,11 @@ class AgenticSearch(BaseSearch):
 
         if query_type == "summary":
             await self._logger.info("[FAST:Step1] Summary intent detected — delegating to doc analysis")
-            answer = await self._summarize_documents(query, paths, top_k_files=top_k_files)
+            answer = await self._summarize_documents(
+                query, paths,
+                top_k_files=top_k_files,
+                scan_result=scan_result,
+            )
             if answer:
                 return answer, self._make_answer_cluster(query, answer, "FS"), context
             await self._logger.info("[FAST:Step1] Summary fallback — no documents, continuing search")
@@ -1576,6 +1630,16 @@ class AgenticSearch(BaseSearch):
                 "[FAST:Step2] Primary miss, trying fine-grained fallback"
             )
             best_file = await self._fast_find_best_file(fallback, **rga_kwargs)
+
+        # --- Fallback: use dir_scan ranked files when rga misses ---
+        if not best_file and scan_result is not None:
+            await self._logger.info("[FAST:Step2] rga miss — falling back to dir_scan ranking")
+            ranked_paths = await self._rank_dir_scan_candidates(
+                query, scan_result, top_k=10, include_medium=True,
+            )
+            if ranked_paths:
+                used_level = "dir_scan"
+                best_file = {"path": ranked_paths[0], "matches": [], "total_matches": 0}
 
         if not best_file:
             await self._logger.warning(
@@ -1910,27 +1974,36 @@ class AgenticSearch(BaseSearch):
 
         return {}, []
 
+    @staticmethod
+    def _has_directory_paths(paths: List[str]) -> bool:
+        """Return True if any element in *paths* is a directory."""
+        return any(Path(p).is_dir() for p in paths)
+
     async def _probe_dir_scan(
         self,
         paths: List[str],
         enable: bool = True,
+        max_files: int = 500,
     ):
         """Scan directories for file metadata (filesystem only, no LLM).
+
+        Automatically skips scanning when all *paths* are single files.
 
         Args:
             paths: Normalised list of path strings to scan.
             enable: Whether directory scanning is enabled.
+            max_files: Cap on number of files to scan (lower = faster).
 
         Returns:
-            ScanResult or None if disabled / no scanner.
+            ScanResult or None if disabled / all paths are files.
         """
-        if not enable:
+        if not enable or not self._has_directory_paths(paths):
             return None
 
         from sirchmunk.scan.dir_scanner import DirectoryScanner
 
-        if self._dir_scanner is None:
-            self._dir_scanner = DirectoryScanner(llm=self.llm, max_files=500)
+        if self._dir_scanner is None or self._dir_scanner.max_files != max_files:
+            self._dir_scanner = DirectoryScanner(llm=self.llm, max_files=max_files)
 
         await self._logger.info("[Probe:DirScan] Scanning directories...")
         scan_result = await self._dir_scanner.scan(paths)
@@ -2013,21 +2086,62 @@ class AgenticSearch(BaseSearch):
         return discovered
 
     async def _rank_dir_scan_candidates(
-        self, query: str, scan_result,
+        self,
+        query: str,
+        scan_result,
+        *,
+        top_k: int = 20,
+        include_medium: bool = False,
     ) -> List[str]:
-        """Run LLM ranking on dir_scan candidates and return high-relevance paths only."""
+        """Run LLM ranking on dir_scan candidates and return relevant paths.
+
+        Args:
+            include_medium: When True, include both high and medium relevance.
+        """
         if self._dir_scanner is None:
             return []
 
-        ranked = await self._dir_scanner.rank(query, scan_result, top_k=20)
+        ranked = await self._dir_scanner.rank(query, scan_result, top_k=top_k)
+        accept = {"high", "medium"} if include_medium else {"high"}
         paths = [
             c.path for c in ranked.ranked_candidates
-            if c.relevance == "high"
+            if c.relevance in accept
         ]
         await self._logger.info(
-            f"[Retrieve:DirScan] {len(paths)} high-relevance files"
+            f"[Retrieve:DirScan] {len(paths)} relevant files "
+            f"(accept={accept})"
         )
         return paths
+
+    async def _scan_and_rank_paths(
+        self,
+        query: str,
+        paths: List[str],
+        *,
+        max_files: int = 300,
+        top_k: int = 20,
+        include_medium: bool = True,
+    ) -> List[str]:
+        """Scan directories and return LLM-ranked relevant file paths.
+
+        Combines :meth:`_probe_dir_scan` (filesystem walk) and
+        :meth:`_rank_dir_scan_candidates` (LLM ranking) in one call.
+        Automatically skips scanning when all *paths* are single files.
+
+        Returns:
+            Ranked file paths (high + optionally medium relevance),
+            or empty list when scanning is not applicable.
+        """
+        scan_result = await self._probe_dir_scan(
+            paths, enable=True, max_files=max_files,
+        )
+        if scan_result is None:
+            return []
+
+        return await self._rank_dir_scan_candidates(
+            query, scan_result,
+            top_k=top_k, include_medium=include_medium,
+        )
 
     # ------------------------------------------------------------------
     # Phase 3: Merge + cluster build
