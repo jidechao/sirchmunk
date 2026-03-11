@@ -18,6 +18,9 @@ from sirchmunk.llm.prompts import (
     FAST_QUERY_ANALYSIS,
     ROI_RESULT_SUMMARY,
     SEARCH_RESULT_SUMMARY,
+    DOC_SUMMARY,
+    DOC_CHUNK_SUMMARY,
+    DOC_MERGE_SUMMARIES,
 )
 from sirchmunk.retrieve.text_retriever import GrepRetriever
 from sirchmunk.schema.knowledge import (
@@ -759,6 +762,26 @@ class AgenticSearch(BaseSearch):
 
         return keyword_sets
 
+    @staticmethod
+    def _extract_alt_keywords(llm_resp: str) -> Dict[str, float]:
+        """Extract cross-lingual keywords from ``<KEYWORDS_ALT>`` block."""
+        fields = extract_fields(content=llm_resp, tags=["KEYWORDS_ALT"])
+        raw = fields.get("keywords_alt")
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return {k: float(v) for k, v in parsed.items() if isinstance(k, str)}
+        except (json.JSONDecodeError, TypeError, ValueError):
+            try:
+                parsed = ast.literal_eval(raw)
+                if isinstance(parsed, dict):
+                    return {k: float(v) for k, v in parsed.items() if isinstance(k, str)}
+            except Exception:
+                pass
+        return {}
+
     # ------------------------------------------------------------------
     # Agentic (ReAct) infrastructure — lazy initialisation
     # ------------------------------------------------------------------
@@ -855,7 +878,7 @@ class AgenticSearch(BaseSearch):
         max_loops: int = 10,
         max_token_budget: int = 128000,
         max_depth: Optional[int] = 8,
-        top_k_files: int = 3,
+        top_k_files: int = 5,
         enable_dir_scan: bool = True,
         include: Optional[List[str]] = None,
         exclude: Optional[List[str]] = None,
@@ -1021,7 +1044,7 @@ class AgenticSearch(BaseSearch):
         max_loops: int = 10,
         max_token_budget: int = 128000,
         max_depth: Optional[int] = 5,
-        top_k_files: int = 3,
+        top_k_files: int = 5,
         enable_dir_scan: bool = True,
         include: Optional[List[str]] = None,
         exclude: Optional[List[str]] = None,
@@ -1249,13 +1272,17 @@ class AgenticSearch(BaseSearch):
             f"loading {len(doc_files)} file(s) for direct analysis: {filenames}"
         )
 
-        # Step 3: extract, (optionally sample), and analyse
-        answer = await analyse_documents(
-            query=query,
-            doc_files=doc_files,
-            llm=self.llm,
-            llm_usages=self.llm_usages,
-        )
+        # Step 3: for summary operations, use the chunked summarizer;
+        # for other operations (translate, explain, etc.), use the general analyser.
+        if operation in ("summarize", "summary", "extract"):
+            answer = await self._summarize_documents(query, paths)
+        else:
+            answer = await analyse_documents(
+                query=query,
+                doc_files=doc_files,
+                llm=self.llm,
+                llm_usages=self.llm_usages,
+            )
 
         if answer:
             await self._logger.success("[DocQA] Direct document analysis complete")
@@ -1296,6 +1323,121 @@ class AgenticSearch(BaseSearch):
         return resp.content or "", None, ctx
 
     # ------------------------------------------------------------------
+    # Document summarization — shared by FAST & DEEP summary intent
+    # ------------------------------------------------------------------
+
+    _SUMMARY_MAX_CONTEXT_CHARS = 100_000
+    _SUMMARY_CHUNK_CHARS = 50_000
+
+    async def _summarize_documents(
+        self,
+        query: str,
+        paths: List[str],
+        *,
+        top_k_files: int = 5,
+    ) -> Optional[str]:
+        """Summarize documents from *paths* with smart content sampling.
+
+        Small files are loaded in full; large files are sampled (head + mid +
+        tail).  When the total content exceeds the LLM context budget, the
+        documents are processed in chunks — each chunk is summarized
+        independently, then the partial summaries are merged in a final pass.
+
+        Returns:
+            Summary string, or ``None`` if no documents could be loaded.
+        """
+        from sirchmunk.doc_qa import collect_doc_files, _extract_text, _sample_text
+
+        doc_files = collect_doc_files(paths, max_files=top_k_files)
+        if not doc_files:
+            return None
+
+        doc_texts: List[Tuple[str, str]] = []
+        total_chars = 0
+        for df in doc_files:
+            text = await _extract_text(df)
+            if text:
+                fname = Path(df.path).name
+                doc_texts.append((fname, text))
+                total_chars += len(text)
+
+        if not doc_texts:
+            return None
+
+        await self._logger.info(
+            f"[Summary] Loaded {len(doc_texts)} doc(s), "
+            f"total {total_chars} chars"
+        )
+
+        needs_sampling = total_chars > self._SUMMARY_MAX_CONTEXT_CHARS
+        per_file_budget = (
+            self._SUMMARY_MAX_CONTEXT_CHARS // len(doc_texts)
+            if needs_sampling else 0
+        )
+
+        parts: List[str] = []
+        for fname, text in doc_texts:
+            content = _sample_text(text, per_file_budget) if needs_sampling else text
+            parts.append(f"#### File: {fname}\n```\n{content}\n```")
+
+        combined = "\n\n".join(parts)
+
+        if len(combined) <= self._SUMMARY_CHUNK_CHARS:
+            return await self._llm_summarize_docs(combined, query)
+
+        return await self._llm_chunked_summarize(combined, query)
+
+    async def _llm_summarize_docs(self, documents: str, query: str) -> str:
+        """Single-pass LLM summarization."""
+        prompt = DOC_SUMMARY.format(documents=documents, user_input=query)
+        resp = await self.llm.achat(
+            messages=[{"role": "user", "content": prompt}],
+            stream=True,
+        )
+        self.llm_usages.append(resp.usage)
+        return resp.content or ""
+
+    async def _llm_chunked_summarize(self, combined: str, query: str) -> str:
+        """Multi-pass chunked summarization for large content."""
+        chunk_size = self._SUMMARY_CHUNK_CHARS
+        chunks = [
+            combined[i:i + chunk_size]
+            for i in range(0, len(combined), chunk_size)
+        ]
+        await self._logger.info(
+            f"[Summary] Content exceeds single-pass limit — "
+            f"splitting into {len(chunks)} chunk(s)"
+        )
+
+        partial_summaries: List[str] = []
+        for idx, chunk in enumerate(chunks, 1):
+            await self._logger.info(f"[Summary] Summarizing chunk {idx}/{len(chunks)}")
+            prompt = DOC_CHUNK_SUMMARY.format(chunk=chunk, user_input=query)
+            resp = await self.llm.achat(
+                messages=[{"role": "user", "content": prompt}],
+                stream=True,
+            )
+            self.llm_usages.append(resp.usage)
+            if resp.content:
+                partial_summaries.append(resp.content)
+
+        if not partial_summaries:
+            return ""
+        if len(partial_summaries) == 1:
+            return partial_summaries[0]
+
+        merged_input = "\n\n---\n\n".join(
+            f"**Part {i}**\n{s}" for i, s in enumerate(partial_summaries, 1)
+        )
+        prompt = DOC_MERGE_SUMMARIES.format(summaries=merged_input, user_input=query)
+        resp = await self.llm.achat(
+            messages=[{"role": "user", "content": prompt}],
+            stream=True,
+        )
+        self.llm_usages.append(resp.usage)
+        return resp.content or ""
+
+    # ------------------------------------------------------------------
     # FAST mode — greedy search with early termination
     # ------------------------------------------------------------------
 
@@ -1314,7 +1456,7 @@ class AgenticSearch(BaseSearch):
         paths: List[str],
         *,
         max_depth: Optional[int] = 5,
-        top_k_files: int = 2,
+        top_k_files: int = 3,
         include: Optional[List[str]] = None,
         exclude: Optional[List[str]] = None,
     ) -> Tuple[str, Optional[KnowledgeCluster], SearchContext]:
@@ -1359,16 +1501,32 @@ class AgenticSearch(BaseSearch):
 
         analysis = self._parse_fast_json(resp.content)
 
-        if analysis.get("type") == "chat":
+        query_type = analysis.get("type", "search")
+
+        if query_type == "chat":
             chat_reply = analysis.get("response", "")
             if chat_reply:
                 await self._logger.info("[FAST:Step1] LLM classified as chat intent")
                 return chat_reply, None, context
             return (await self._respond_chat(query, context))
 
+        if query_type == "summary":
+            await self._logger.info("[FAST:Step1] Summary intent detected — delegating to doc analysis")
+            answer = await self._summarize_documents(query, paths, top_k_files=top_k_files)
+            if answer:
+                return answer, self._make_answer_cluster(query, answer, "FS"), context
+            await self._logger.info("[FAST:Step1] Summary fallback — no documents, continuing search")
+
         primary = analysis.get("primary", [])[:2]
         fallback = analysis.get("fallback", [])[:3]
+        primary_alt = analysis.get("primary_alt", [])[:2]
+        fallback_alt = analysis.get("fallback_alt", [])[:3]
         file_hints = analysis.get("file_hints", [])
+
+        if primary_alt:
+            primary = primary + primary_alt
+        if fallback_alt:
+            fallback = fallback + fallback_alt
 
         if not primary and not fallback:
             await self._logger.warning("[FAST] No keywords extracted")
@@ -1497,7 +1655,7 @@ class AgenticSearch(BaseSearch):
                 results = await self.grep_retriever.retrieve(
                     terms=kw, path=paths, literal=True, regex=False,
                     max_depth=max_depth, include=include, exclude=exclude,
-                    timeout=15.0,
+                    timeout=30.0,
                 )
                 if results:
                     all_raw.extend(results)
@@ -1514,7 +1672,7 @@ class AgenticSearch(BaseSearch):
                 results = await self.grep_retriever.retrieve(
                     terms=pattern, path=paths, literal=False, regex=True,
                     max_depth=max_depth, include=include, exclude=exclude,
-                    timeout=15.0,
+                    timeout=30.0,
                 )
                 if results:
                     all_raw.extend(results)
@@ -1529,7 +1687,7 @@ class AgenticSearch(BaseSearch):
                 fn_results = await self.grep_retriever.retrieve_by_filename(
                     patterns=[f".*{re.escape(kw)}.*" for kw in keywords],
                     path=paths, case_sensitive=False, max_depth=max_depth,
-                    timeout=15.0,
+                    timeout=30.0,
                 )
                 if fn_results:
                     return {
@@ -1704,6 +1862,9 @@ class AgenticSearch(BaseSearch):
     ) -> Tuple[Dict[str, float], List[str]]:
         """Extract multi-level keywords from the query via LLM.
 
+        Also extracts cross-lingual alternative keywords from the
+        ``<KEYWORDS_ALT>`` block and merges them into the result list.
+
         Returns:
             Tuple of (keyword_idf_dict, keyword_list).
         """
@@ -1719,11 +1880,20 @@ class AgenticSearch(BaseSearch):
         keyword_sets = self._extract_and_validate_multi_level_keywords(
             kw_response.content, num_levels=2,
         )
+
+        alt_keywords = self._extract_alt_keywords(kw_response.content)
+        if alt_keywords:
+            await self._logger.info(f"[Probe:Keywords] Cross-lingual alt: {list(alt_keywords.keys())}")
+
         for kw_set in keyword_sets:
             if kw_set:
-                kw_list = list(kw_set.keys())
+                merged = {**kw_set, **alt_keywords}
+                kw_list = list(merged.keys())
                 await self._logger.info(f"[Probe:Keywords] Extracted: {kw_list}")
-                return kw_set, kw_list
+                return merged, kw_list
+
+        if alt_keywords:
+            return alt_keywords, list(alt_keywords.keys())
 
         return {}, []
 
@@ -1875,7 +2045,7 @@ class AgenticSearch(BaseSearch):
         query: str,
         file_paths: List[str],
         query_keywords: Dict[str, float],
-        top_k_files: int = 3,
+        top_k_files: int = 5,
         top_k_snippets: int = 5,
     ) -> Optional[KnowledgeCluster]:
         """Build a KnowledgeCluster via knowledge_base.build().
@@ -2002,7 +2172,7 @@ class AgenticSearch(BaseSearch):
         answer: str,
         context: SearchContext,
         query_keywords: Dict[str, float],
-        top_k_files: int = 3,
+        top_k_files: int = 5,
     ) -> Optional[KnowledgeCluster]:
         """Build a KnowledgeCluster from files discovered during a ReAct session.
 

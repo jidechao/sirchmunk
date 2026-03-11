@@ -59,11 +59,16 @@ Extract {num_levels} levels of keywords with progressively finer granularity:
 - **Level {num_levels}**: Fine-grained single words or precise technical terms
 - ONLY extract from the user query context; do NOT add external information
 - Ensure keywords at different levels are complementary, not redundant
+- **Cross-lingual**: After all keyword levels, provide a small set (2-4) of the most important keywords translated to the other language (Chinese↔English). Only translate the core domain terms — skip generic words.
 
 ### Output Format:
-Output {num_levels} separate JSON-like dicts within their respective tags:
+Output {num_levels} separate JSON-like dicts within their respective tags, followed by a cross-lingual block:
 
 {output_format_example}
+
+<KEYWORDS_ALT>
+{{"translated_keyword1": idf_value, "translated_keyword2": idf_value}}
+</KEYWORDS_ALT>
 
 ### User Query:
 {{user_input}}
@@ -249,6 +254,71 @@ based strictly on the document content.
 """
 
 
+DOC_SUMMARY = """
+### Role: Document Summarization Expert
+
+### Task
+Generate a comprehensive summary of the provided document(s) in response to the user's request.
+
+### Constraints
+1. **Language Continuity**: Output MUST be in the **same language** as the User Input.
+2. **Format**: Use Markdown with clear headings, bullet points, and bold text for readability.
+3. **Faithfulness**: Base your summary strictly on the provided content. Do not fabricate information.
+4. **Conciseness**: Capture the key points, main arguments, conclusions, and important details.
+5. If content has been sampled (indicated by `[...content sampled...]` markers),
+   note that the summary is based on excerpts.
+
+### Document Content
+{documents}
+
+### User Input
+{user_input}
+
+### Output
+Provide a well-structured Markdown summary.
+"""
+
+
+DOC_CHUNK_SUMMARY = """
+### Task
+Summarize the following document chunk concisely, preserving key points, arguments, and important details.
+
+### Constraints
+1. **Language Continuity**: Output MUST be in the **same language** as the User Input.
+2. **Conciseness**: Distill to the essential points only.
+
+### Document Chunk
+{chunk}
+
+### User Input
+{user_input}
+
+### Output
+Return a concise summary of this chunk.
+"""
+
+
+DOC_MERGE_SUMMARIES = """
+### Task
+Merge the following partial summaries into a single, coherent, comprehensive summary.
+
+### Constraints
+1. **Language Continuity**: Output MUST be in the **same language** as the User Input.
+2. **Format**: Use Markdown with clear headings, bullet points, and bold text.
+3. **Deduplication**: Remove redundant points across partial summaries.
+4. **Coherence**: Produce a unified document, not a list of separate summaries.
+
+### Partial Summaries
+{summaries}
+
+### User Input
+{user_input}
+
+### Output
+Provide a well-structured Markdown summary.
+"""
+
+
 QUERY_REWRITE = """Given the conversation history and the latest user message, rewrite the user message into a standalone search query that captures the full intent without relying on prior context. If the message is already self-contained, return it unchanged.
 
 ### Conversation History
@@ -268,20 +338,27 @@ FAST_QUERY_ANALYSIS = """Classify the user query and, if it is a document/file s
 
 ### Output
 Return JSON only, no extra text:
-{{"type": "search", "primary": ["compound phrase"], "fallback": ["term1", "term2"], "file_hints": [], "intent": "..."}}
+{{"type": "search", "primary": ["compound phrase"], "fallback": ["term1", "term2"], "primary_alt": [], "fallback_alt": [], "file_hints": [], "intent": "..."}}
 
 Rules:
-- **type**: "search" if the query requires retrieving information from files or documents; "chat" if it is a greeting, small talk, identity question, or any other conversational message that does NOT need file retrieval. When type is "chat", set primary and fallback to empty arrays and put a brief natural reply (same language as the query) in "response".
+- **type**: "search" if the query requires retrieving information from files or documents; "chat" if it is a greeting, small talk, identity question, or any other conversational message that does NOT need file retrieval. When type is "chat", set primary and fallback to empty arrays and put a brief natural reply (same language as the query) in "response". "summary" if the user wants to summarize, review, or analyze entire documents without searching for specific information — set primary/fallback to empty arrays.
 - **primary**: 1 compound phrase (2-3 words) most likely to appear **verbatim** in the target document. Tried first.
 - **fallback**: 1-3 single-word atomic terms from the primary phrase. Tried only if primary misses.
+- **primary_alt / fallback_alt**: Cross-lingual equivalents of primary/fallback. If the query is in Chinese, provide English translations; if in English, provide Chinese translations. Only translate the most critical 1-2 terms. Empty arrays if no meaningful translation exists.
 - **file_hints**: filename fragments or glob patterns ONLY if clearly implied; empty array otherwise.
 - **intent**: one sentence describing the query intent.
 
 Example: query "How does transformer attention work?"
-→ {{"type": "search", "primary": ["transformer attention"], "fallback": ["attention", "transformer"], "file_hints": [], "intent": "understand transformer attention mechanism"}}
+→ {{"type": "search", "primary": ["transformer attention"], "fallback": ["attention", "transformer"], "primary_alt": ["注意力机制"], "fallback_alt": ["注意力", "变换器"], "file_hints": [], "intent": "understand transformer attention mechanism"}}
+
+Example: query "认证机制怎么实现"
+→ {{"type": "search", "primary": ["认证机制"], "fallback": ["认证", "鉴权"], "primary_alt": ["authentication"], "fallback_alt": ["auth"], "file_hints": [], "intent": "了解认证机制的实现方式"}}
 
 Example: query "你好"
-→ {{"type": "chat", "primary": [], "fallback": [], "file_hints": [], "intent": "greeting", "response": "你好！我是 Sirchmunk，一个智能文档搜索助手。有什么可以帮你的？"}}
+→ {{"type": "chat", "primary": [], "fallback": [], "primary_alt": [], "fallback_alt": [], "file_hints": [], "intent": "greeting", "response": "你好！我是 Sirchmunk，一个智能文档搜索助手。有什么可以帮你的？"}}
+
+Example: query "总结这几篇文档"
+→ {{"type": "summary", "primary": [], "fallback": [], "primary_alt": [], "fallback_alt": [], "file_hints": [], "intent": "summarize documents"}}
 """
 
 
