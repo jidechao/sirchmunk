@@ -190,7 +190,7 @@ def get_current_env_variables() -> Dict[str, Any]:
             "value": os.getenv("LLM_MODEL_NAME", _DEFAULT_LLM_MODEL_NAME),
             "default": _DEFAULT_LLM_MODEL_NAME,
             "description": "Model name for LLM. "
-                           "Examples: gpt-5.2, MiniMax-M2.5, deepseek-chat",
+                           "Examples: gpt-5.2, MiniMax-M2.7, deepseek-chat",
             "category": "llm"
         },
         "GREP_CONCURRENT_LIMIT": {
