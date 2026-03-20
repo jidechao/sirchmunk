@@ -269,7 +269,7 @@ llm = OpenAIChat(
     api_key="your-minimax-api-key",
     base_url="https://api.minimax.io/v1",     # 海外版
     # base_url="https://api.minimaxi.com/v1", # 国内版
-    model="MiniMax-M2.5"                       # 或 "MiniMax-M2.5-highspeed"
+    model="MiniMax-M2.7"                       # 或 "MiniMax-M2.7-highspeed"
 )
 ```
 
@@ -664,8 +664,9 @@ KnowledgeCluster 是一个丰富标注的对象，完整记录了单次搜索周
 
 | 方法 | 端点 | 说明 |
 |------|------|------|
-| `POST` | `/api/v1/search` | 执行搜索查询 |
-| `GET` | `/api/v1/search/status` | 检查服务器和 LLM 配置状态 |
+| `POST` | `/api/v1/search` | 执行搜索查询（完成后一次性返回 JSON） |
+| `POST` | `/api/v1/search/stream` | 请求体与 `/search` 相同；通过 **SSE** 流式返回运行日志及最终 `result` / `error` |
+| `GET` | `/api/v1/search/status` | 检查服务器与 LLM 配置（含 `max_concurrent_searches`） |
 
 **交互式文档：** http://localhost:8584/docs（Swagger UI）
 
@@ -789,6 +790,163 @@ if (data.success) {
 </details>
 
 <details>
+<summary><b>SSE 流式搜索（<code>/api/v1/search/stream</code>）</b></summary>
+
+需要 **实时查看搜索过程日志** 时使用本接口（检索流程与 `POST /api/v1/search` 一致）。响应类型为 **`text/event-stream`**（Server-Sent Events）。请求 JSON 与 `/api/v1/search` **完全相同**。
+
+**事件类型**
+
+| SSE `event` | `data`（JSON） | 含义 |
+|-------------|----------------|------|
+| `log` | `{"level":"info",...,"message":"..."}` | 搜索流水线输出的一条日志 |
+| `result` | `{"success":true,"data":{...}}` | 最终结果（`data` 与 `/search` 一致：可为 `summary`、`files` 或 `context`） |
+| `error` | `{"error":"..."}` | 致命错误，流结束 |
+
+以 `:` 开头的行是心跳/注释，可忽略。
+
+**并发限制**
+
+服务端通过环境变量 **`SIRCHMUNK_MAX_CONCURRENT_SEARCHES`**（默认 `3`）限制同时进行的搜索任务数，超出时新请求会排队等待。可在 `GET /api/v1/search/status` 的响应中查看 **`max_concurrent_searches`**。
+
+**cURL（使用 `-N` / `--no-buffer` 才能实时看到分块输出）**
+
+```bash
+curl -N -X POST "http://localhost:8584/api/v1/search/stream" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "query": "认证是如何工作的？",
+    "paths": ["/path/to/project"],
+    "mode": "FAST"
+  }'
+```
+
+**Python — `requests`（按行流式读取）**
+
+```python
+import json
+import requests
+
+url = "http://localhost:8584/api/v1/search/stream"
+payload = {
+    "query": "认证是如何工作的？",
+    "paths": ["/path/to/project"],
+    "mode": "FAST",
+}
+
+event_type = ""
+with requests.post(
+    url, json=payload, stream=True, timeout=(10, 600),
+    headers={"Accept": "text/event-stream"},
+) as resp:
+    resp.raise_for_status()
+    for raw in resp.iter_lines(decode_unicode=True):
+        if raw is None or raw == "":
+            continue
+        if raw.startswith(":"):
+            continue
+        if raw.startswith("event: "):
+            event_type = raw[7:].strip()
+            continue
+        if raw.startswith("data: "):
+            obj = json.loads(raw[6:])
+            if event_type == "log":
+                print(f"[{obj.get('level', 'info')}] {obj.get('message', '')}")
+            elif event_type == "result":
+                print("完成:", json.dumps(obj, indent=2, ensure_ascii=False))
+            elif event_type == "error":
+                print("错误:", obj.get("error"))
+            event_type = ""
+```
+
+**Python — `httpx`**
+
+```python
+import json
+import httpx
+
+url = "http://localhost:8584/api/v1/search/stream"
+payload = {"query": "查找 API 路由", "paths": ["/path/to/project"], "mode": "DEEP"}
+
+event_type = ""
+with httpx.Client(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+    with client.stream(
+        "POST",
+        url,
+        json=payload,
+        headers={"Accept": "text/event-stream"},
+    ) as resp:
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if not line or line.startswith(":"):
+                continue
+            if line.startswith("event: "):
+                event_type = line[7:].strip()
+                continue
+            if line.startswith("data: "):
+                obj = json.loads(line[6:])
+                if event_type == "log":
+                    print(obj.get("message", ""))
+                elif event_type == "result":
+                    data = obj.get("data", {})
+                    print(data.get("summary") or data)
+                event_type = ""
+```
+
+**JavaScript — `fetch` + ReadableStream**（`EventSource` 仅支持 GET；POST 的 SSE 需用 `fetch`）
+
+```javascript
+async function searchStream(baseUrl, body) {
+  const res = await fetch(`${baseUrl}/api/v1/search/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text());
+
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let currentEvent = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const parts = buf.split("\n\n");
+    buf = parts.pop() || "";
+    for (const block of parts) {
+      let dataLine = null;
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) currentEvent = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataLine = line.slice(5).trim();
+      }
+      if (!dataLine) continue;
+      const obj = JSON.parse(dataLine);
+      if (currentEvent === "log") console.log(`[${obj.level}]`, obj.message);
+      if (currentEvent === "result") console.log("result", obj);
+      if (currentEvent === "error") console.error(obj.error);
+    }
+  }
+}
+
+await searchStream("http://localhost:8584", {
+  query: "认证是如何工作的？",
+  paths: ["/path/to/project"],
+  mode: "FAST",
+});
+```
+
+**命令行**
+
+`sirchmunk search --api` 在可用时会优先调用本流式端点，实时打印日志，最后输出摘要。
+
+</details>
+
+<details>
 <summary><b>请求参数说明</b></summary>
 
 | 参数 | 类型 | 默认值 | 说明 |
@@ -830,7 +988,7 @@ Sirchmunk 采用 **无索引** 方法：
 
 任何 OpenAI 兼容 API 端点，包括但不限于：
 - OpenAI（GPT-5.2, ...）
-- [MiniMax](https://platform.minimax.io)（MiniMax-M2.5、MiniMax-M2.5-highspeed）
+- [MiniMax](https://platform.minimax.io)（MiniMax-M2.7、MiniMax-M2.7-highspeed、MiniMax-M2.5）
 - DeepSeek、Moonshot、Mistral、Groq、Together AI、Cohere
 - Google Gemini、智谱（GLM）、百川、零一万物、硅基流动、火山引擎
 - Azure OpenAI
@@ -842,7 +1000,7 @@ Sirchmunk 采用 **无索引** 方法：
 LLM_BASE_URL=https://api.minimax.io/v1        # 海外版
 # LLM_BASE_URL=https://api.minimaxi.com/v1    # 国内版
 LLM_API_KEY=your-minimax-api-key
-LLM_MODEL_NAME=MiniMax-M2.5
+LLM_MODEL_NAME=MiniMax-M2.7
 ```
 
 详见 [MiniMax OpenAI 兼容 API 文档](https://platform.minimax.io/docs/api-reference/text-openai-api)。
