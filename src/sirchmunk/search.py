@@ -34,6 +34,7 @@ from sirchmunk.schema.request import ContentItem, Message, Request
 from sirchmunk.schema.search_context import SearchContext
 from sirchmunk.storage.knowledge_storage import KnowledgeStorage
 from sirchmunk.utils.constants import DEFAULT_SIRCHMUNK_WORK_PATH
+from sirchmunk.utils.embedding_util import EmbeddingUtil
 from sirchmunk.utils.deps import check_dependencies
 from sirchmunk.utils import create_logger, LogCallback
 from loguru import logger as _loguru_logger
@@ -82,6 +83,7 @@ class AgenticSearch(BaseSearch):
     def __init__(
         self,
         llm: Optional[OpenAIChat] = None,
+        embedding: Optional[EmbeddingUtil] = None,
         work_path: Optional[Union[str, Path]] = None,
         paths: Optional[Union[str, Path, List[str], List[Path]]] = None,
         verbose: bool = True,
@@ -148,19 +150,29 @@ class AgenticSearch(BaseSearch):
         self.cluster_sim_top_k: int = kwargs.pop('cluster_sim_top_k', 3)
         if reuse_knowledge:
             try:
-                from sirchmunk.utils.embedding_util import EmbeddingUtil
-
-                embedding_cache = os.getenv("EMBEDDING_CACHE_DIR")
-                cache_dir = (
-                    embedding_cache
-                    if embedding_cache
-                    else str(self.work_path / ".cache" / "models")
-                )
-                self.embedding_client = EmbeddingUtil(cache_dir=cache_dir)
-                self.embedding_client.start_loading()
-                _loguru_logger.info(
-                    "Embedding client created, background model loading started"
-                )
+                # Use provided embedding instance if available
+                if embedding is not None:
+                    self.embedding_client = embedding
+                    self.embedding_client.start_loading()
+                    _loguru_logger.info(
+                        f"Using provided embedding client (model={self.embedding_client.model_id or 'default'}, cache_dir={self.embedding_client._cache_dir or 'default'})"
+                    )
+                else:
+                    embedding_cache = os.getenv("EMBEDDING_CACHE_DIR")
+                    cache_dir = (
+                        embedding_cache
+                        if embedding_cache
+                        else str(self.work_path / ".cache" / "models")
+                    )
+                    embedding_model_id = os.getenv("EMBEDDING_MODEL_ID")
+                    self.embedding_client = EmbeddingUtil(
+                        model_id=embedding_model_id,
+                        cache_dir=cache_dir
+                    )
+                    self.embedding_client.start_loading()
+                    _loguru_logger.info(
+                        f"Embedding client created (model={embedding_model_id or 'default'}, cache_dir={cache_dir}), background model loading started"
+                    )
             except Exception as e:
                 _loguru_logger.error(
                     f"Failed to initialize embedding client: {e}. "

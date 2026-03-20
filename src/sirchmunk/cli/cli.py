@@ -165,6 +165,13 @@ MCP_HOST=localhost
 
 # Port for HTTP transport
 MCP_PORT=8080
+
+# ===== Optional: Custom Embedding Model Settings =====
+# Embedding model ID (from ModelScope or HuggingFace)
+EMBEDDING_MODEL_ID=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+
+# Embedding model cache directory
+EMBEDDING_CACHE_DIR=${SIRCHMUNK_WORK_PATH}/.cache/models
 """
 
     with open(env_file, "w") as f:
@@ -292,9 +299,12 @@ def _run_base_init(work_path: Path) -> int:
     try:
         from sirchmunk.utils.embedding_util import EmbeddingUtil
 
-        model_cache_dir = str(work_path / ".cache" / "models")
+        model_cache_dir = os.getenv("EMBEDDING_CACHE_DIR", str(work_path / ".cache" / "models"))
+        # Read embedding model id from environment or use default
+        embedding_model_id = os.getenv("EMBEDDING_MODEL_ID", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
         model_dir = EmbeddingUtil.preload_model(
             cache_dir=model_cache_dir,
+            model_id=embedding_model_id,
         )
         print(f"  ✓ Embedding model downloaded: {model_dir}")
     except Exception as e:
