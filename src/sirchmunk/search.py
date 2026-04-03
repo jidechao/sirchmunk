@@ -350,12 +350,16 @@ class AgenticSearch(BaseSearch):
         except Exception as e:
             _loguru_logger.warning(f"Failed to load historical knowledge: {e}")
 
-    async def _try_reuse_cluster(self, query: str) -> Optional[KnowledgeCluster]:
+    async def _try_reuse_cluster(self, query: str, paths: Optional[List[str]] = None) -> Optional[KnowledgeCluster]:
         """Try to reuse existing knowledge cluster based on semantic similarity.
 
         The method waits (non-blocking) for the embedding model to become
         ready so that reuse works reliably even on the first search call
         within a process.
+
+        Args:
+            query: The search query string.
+            paths: Optional list of file paths to filter cluster search scope.
 
         Returns:
             KnowledgeCluster if a suitable cached cluster is found, None otherwise.
@@ -385,6 +389,7 @@ class AgenticSearch(BaseSearch):
                 query_embedding=query_embedding,
                 top_k=self.cluster_sim_top_k,
                 similarity_threshold=self.cluster_sim_threshold,
+                search_paths=paths,
             )
 
             if not similar_clusters:
@@ -1118,7 +1123,7 @@ class AgenticSearch(BaseSearch):
         # When reuse_knowledge=True and a similar cluster is found, we
         # return here — Phase 5 (Persistence) is not executed for that path.
         # ==============================================================
-        reused = await self._try_reuse_cluster(query)
+        reused = await self._try_reuse_cluster(query, paths)
         if reused is not None:
             content = reused.content
             if isinstance(content, list):
@@ -1565,7 +1570,7 @@ class AgenticSearch(BaseSearch):
         # Step 0: Cluster reuse — instant short-circuit (no LLM cost)
         # When reuse succeeds we return here; no persistence step runs.
         # ==============================================================
-        reused = await self._try_reuse_cluster(query)
+        reused = await self._try_reuse_cluster(query, paths)
         if reused is not None:
             content = reused.content
             if isinstance(content, list):
